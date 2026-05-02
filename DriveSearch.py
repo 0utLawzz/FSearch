@@ -16,10 +16,16 @@ import pickle
 try:
     import gspread
     from google.oauth2.service_account import Credentials
-    from gspread.formatting import cell_format, color, textFormat
     GOOGLE_SHEETS_AVAILABLE = True
 except ImportError:
     GOOGLE_SHEETS_AVAILABLE = False
+
+# Formatting is optional
+try:
+    from gspread.formatting import cell_format, color, textFormat
+    GSPREAD_FORMATTING_AVAILABLE = True
+except ImportError:
+    GSPREAD_FORMATTING_AVAILABLE = False
 
 try:
     from googleapiclient.discovery import build
@@ -854,12 +860,13 @@ class DriveSearcher:
             if is_empty:
                 print("Adding header row with formatting...")
                 worksheet.append_row(header_with_emoji, value_input_option='RAW')
-                # Format header: bold, background color
-                fmt = cell_format(
-                    backgroundColor=color(0.2, 0.4, 0.8),
-                    textFormat=textFormat(bold=True, fontSize=11)
-                )
-                worksheet.format(f'1:1', fmt)
+                # Format header: bold, background color (if formatting available)
+                if GSPREAD_FORMATTING_AVAILABLE:
+                    fmt = cell_format(
+                        backgroundColor=color(0.2, 0.4, 0.8),
+                        textFormat=textFormat(bold=True, fontSize=11)
+                    )
+                    worksheet.format(f'1:1', fmt)
 
             # Upload data and report stats
             if new_rows:
