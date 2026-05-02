@@ -1,0 +1,26 @@
+# Secrets
+credentials.json
+service-account.json
+token.pickle
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Outputs / exports
+*.csv
+*.jsonl
+*.log
+OutputData/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""
+Google Drive File Search and Metadata Extractor
+Searches through Google Drive Desktop synced folder and lists all files with detailed metadata
+"""
+
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Optional
+import json
+import argparse
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GOOGLE_SHEETS_AVAILABLE = True
+except ImportError:
+    GOOGLE_SHEETS_AVAILABLE = False
+
+# Google Sheets Configuration
+GOOGLE_SHEET_ID = "1YrrqKaeslySq565uwKOzEQJKEVzVmASzNmOn8yx0W-s"
+GOOGLE_SHEET_NAME = "Sheet"
+
+class DriveSearcher:
+    def __init__(self, drive_path: Optional[str] = None):
+        """
+        Initialize the Drive Searcher
+        
+        Args:
+            drive_path: Path to Google Drive folder. If None, tries common locations.
+                        Can be pipe-delimited for multiple paths (e.g., "path1|path2").
+        """
+        path_str = self._find_drive_path(drive_path)
+        # Handle multiple paths (pipe-delimited)
+        if '|' in path_str:
+            self.drive_paths = path_str.split('|')
+            self.drive_path = self.drive_paths[0]  # For backward compatibility
+            print(f"Searching {len(self.drive_paths)} paths:")
+            for p in self.drive_paths:
+                print(f"  - {p}")
+        else:
+            self.drive_paths = [path_str]
+            self.drive_path = path_str
+        self.files_data = []
+        
+    def _select_path_menu(self) -> str:
+        """Display menu to select or enter a local path"""
+        print("\n" + "="*60)
+        print("SELECT LOCAL PATH TO SEARCH")
+        print("="*60)
+        
+        # Specific paths to search
+        path1 = "F:\\Brandex004\\My Drive\\1 ALL CLIENTS"
+        path2 = "F:\\Brandex004\\My Drive\\2 CONSULTANTS"
+        
+        # Display available options
+        print("\nAvailable paths:")
+        exists1 = "✓" if os.path.exists(path1) else "✗"
+        exists2 = "✓" if os.path.exists(path2) else "✗"
+        print(f"  1. [{exists1}] {path1}")
+        print(f"  2. [{exists2}] {path2}")
+        print(f"  3. Both paths")
+        
+        while True:
+            try:
+                choice = input("\nSelect option (1-3): ").strip()
+                choice_num = int(choice)
+                
+                if choice_num == 1:
+                    if os.path.exists(path1):
+                        print(f"Selected: {path1}")
+                        return path1
+                    else:
+                        print(f"Error: Path does not exist: {path1}")
+                        print("Please select another option.")
+                elif choice_num == 2:
+                    if os.path.exists(path2):
+                        print(f"Selected: {path2}")
+                        return path2
+                    else:
+                        print(f"Error: Path does not exist: {path2}")
+                        print("Please select another option.")
+                elif choice_num == 3:
+                    if os.path.exists(path1) and os.path.exists(path2):
+                        print(f"Selected: Both paths")
+                        return f"{path1}|{path2}"  # Use delimiter to indicate both
+                    else:
+                        missing = []
+                        if not os.path.exists(path1):
+                            missing.append(path1)
+                        if not os.path.exists(path2):
+                            missing.append(path2)
+                        print(f"Error: Path(s) do not exist: {', '.join(missing)}")
+                        print("Please select another option.")
+                else:
+                    print("Invalid option. Please enter 1-3.")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+                sys.exit(0)
+
+    def _find_drive_path(self, drive_path: Optional[str] = None) -> str:
+        """Find Google Drive folder path"""
+        if drive_path and os.path.exists(drive_path):
+            return drive_path
+            
+        # If no path provided, show menu
+        return self._select_path_menu()
+    
+    def _get_file_metadata(self, file_path: Path, base_path: Optional[str] = None) -> Dict:
+        """Extract comprehensive metadata for a file"""
+        try:
+            stat = file_path.stat()
+            # Use provided base_path or fall back to self.drive_path
+            actual_base_path = base_path if base_path else self.drive_path
+            relative_path = str(file_path.relative_to(actual_base_path))
+            
+            # Trim base path from full path (remove F:\Brandex004\My Drive\)
+            full_path = str(file_path)
+            base_prefix = r"F:\Brandex004\My Drive\\"
+            trimmed_path = full_path.replace(base_prefix.rstrip("\\"), "") if full_path.startswith(base_prefix.rstrip("\\")) else full_path
+            
+            # Split relative path into levels
+            path_parts = relative_path.split('\\')
+            level_file = file_path.stem  # filename without extension
+            
+            return {
+                'name': file_path.name,
+                'path': trimmed_path,
+                'relative_path': relative_path,
+                'size_mb': round(stat.st_size / (1024 * 1024), 2),
+                'extension': file_path.suffix.lower() if file_path.suffix else 'NO_EXTENSION',
+                'file_type': self._get_file_type(file_path.suffix),
+                'created_date': datetime.fromtimestamp(stat.st_ctime).strftime('%d-%b-%y'),
+                'modified_date': datetime.fromtimestamp(stat.st_mtime).strftime('%d-%b-%y'),
+                'accessed_date': datetime.fromtimestamp(stat.st_atime).strftime('%d-%b-%y'),
+                'is_directory': file_path.is_dir(),
+                'is_hidden': file_path.name.startswith('.'),
+                'parent_folder': file_path.parent.name,
+                'depth': len(file_path.parts) - len(Path(actual_base_path).parts),
+                'LEVEL1': path_parts[0] if len(path_parts) > 0 else '',
+                'LEVEL2': path_parts[1] if len(path_parts) > 1 else '',
+                'LEVEL3': path_parts[2] if len(path_parts) > 2 else '',
+                'LEVEL4': path_parts[3] if len(path_parts) > 3 else '',
+                'LEVEL5': path_parts[4] if len(path_parts) > 4 else '',
+                'LEVEL_FILE': level_file
+            }
+        except (OSError, PermissionError) as e:
+            return {
+                'name': file_path.name,
+                'path': str(file_path),
+                'error': f"Access denied: {str(e)}"
+            }
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size in human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} PB"
+    
+    def _get_file_type(self, extension: str) -> str:
+        """Categorize file type based on extension"""
+        extension = extension.lower()
+        
+        type_mapping = {
+            # Documents
+            '.pdf': 'PDF Document',
+            '.doc': 'Word Document', '.docx': 'Word Document',
+            '.xls': 'Excel Spreadsheet', '.xlsx': 'Excel Spreadsheet',
+            '.ppt': 'PowerPoint', '.pptx': 'PowerPoint',
+            '.txt': 'Text File', '.rtf': 'Rich Text',
+            '.odt': 'OpenDocument Text', '.ods': 'OpenDocument Spreadsheet',
+            
+            # Images
+            '.jpg': 'Image', '.jpeg': 'Image', '.png': 'Image', '.gif': 'Image',
+            '.bmp': 'Image', '.tiff': 'Image', '.svg': 'Image', '.webp': 'Image',
+            '.ico': 'Icon', '.psd': 'Photoshop File',
+            
+            # Videos
+            '.mp4': 'Video', '.avi': 'Video', '.mkv': 'Video', '.mov': 'Video',
+            '.wmv': 'Video', '.flv': 'Video', '.webm': 'Video', '.m4v': 'Video',
+            
+            # Audio
+            '.mp3': 'Audio', '.wav': 'Audio', '.flac': 'Audio', '.aac': 'Audio',
+            '.ogg': 'Audio', '.wma': 'Audio', '.m4a': 'Audio',
+            
+            # Archives
+            '.zip': 'Archive', '.rar': 'Archive', '.7z': 'Archive',
+            '.tar': 'Archive', '.gz': 'Archive', '.bz2': 'Archive',
+            
+            # Code
+            '.py': 'Python Code', '.js': 'JavaScript', '.html': 'HTML',
+            '.css': 'CSS', '.java': 'Java', '.cpp': 'C++', '.c': 'C',
+            '.php': 'PHP', '.rb': 'Ruby', '.go': 'Go', '.rs': 'Rust',
+            
+            # Other
+            '.exe': 'Executable', '.msi': 'Installer', '.dll': 'Library',
+            '.iso': 'Disk Image', '.db': 'Database', '.sql': 'SQL File'
+        }
+        
+        return type_mapping.get(extension, f'{extension.upper()} File' if extension else 'Folder')
+    
+    def search_drive(self, 
+                    extension_filter: Optional[str] = None,
+                    name_filter: Optional[str] = None,
+                    min_size: Optional[int] = None,
+                    max_size: Optional[int] = None,
+                    include_dirs: bool = True) -> List[Dict]:
+        """
+        Search through Google Drive folder
+        
+        Args:
+            extension_filter: Filter by file extension (e.g., '.pdf', 'pdf')
+            name_filter: Filter by filename (contains)
+            min_size: Minimum file size in bytes
+            max_size: Maximum file size in bytes
+            include_dirs: Include directories in results
+            
+        Returns:
+            List of file metadata dictionaries
+        """
+        print(f"Searching Google Drive at: {self.drive_path}")
+        print("This may take a while for large drives...")
+        
+        # Normalize extension filter
+        if extension_filter and not extension_filter.startswith('.'):
+            extension_filter = '.' + extension_filter.lower()
+        
+        # Extensions to exclude
+        excluded_extensions = {'.ini', '.tmp'}
+        
+        files_found = 0
+        
+        for search_path_str in self.drive_paths:
+            print(f"Searching: {search_path_str}")
+            search_path = Path(search_path_str)
+            
+            try:
+                for item in search_path.rglob('*'):
+                    try:
+                        # Skip if we don't want directories and this is a directory
+                        if item.is_dir() and not include_dirs:
+                            continue
+                        
+                        # Exclude certain file types
+                        if item.suffix.lower() in excluded_extensions:
+                            continue
+                        
+                        # Apply filters
+                        if extension_filter and item.suffix.lower() != extension_filter:
+                            continue
+                        if name_filter and name_filter.lower() not in item.name.lower():
+                            continue
+                        
+                        metadata = self._get_file_metadata(item, base_path=search_path_str)
+                        
+                        # Size filters (skip for directories) - convert bytes to MB
+                        if not item.is_dir():
+                            min_size_mb = min_size / (1024 * 1024) if min_size else None
+                            max_size_mb = max_size / (1024 * 1024) if max_size else None
+                            if min_size_mb and metadata.get('size_mb', 0) < min_size_mb:
+                                continue
+                            if max_size_mb and metadata.get('size_mb', 0) > max_size_mb:
+                                continue
+                        
+                        self.files_data.append(metadata)
+                        files_found += 1
+                        
+                        # Progress indicator
+                        if files_found % 100 == 0:
+                            print(f"Found {files_found} items...")
+                            
+                    except (PermissionError, OSError) as e:
+                        print(f"Skipping {item}: {e}")
+                        continue
+                        
+            except KeyboardInterrupt:
+                print(f"\nSearch interrupted. Found {files_found} items so far.")
+                break
+        
+        print(f"Search completed. Found {len(self.files_data)} items.")
+        return self.files_data
+    
+    def display_results(self, 
+                       sort_by: str = 'name',
+                       reverse: bool = False,
+                       show_details: bool = True):
+        """Display search results in formatted table"""
+        if not self.files_data:
+            print("No files found.")
+            return
+        
+        # Sort results
+        sort_key_map = {
+            'name': 'name',
+            'size': 'size_mb',
+            'modified': 'modified_date',
+            'created': 'created_date',
+            'type': 'file_type',
+            'extension': 'extension'
+        }
+        
+        key = sort_key_map.get(sort_by, 'name')
+        try:
+            self.files_data.sort(key=lambda x: x.get(key, ''), reverse=reverse)
+        except TypeError:
+            # Handle mixed types in sorting
+            self.files_data.sort(key=lambda x: str(x.get(key, '')), reverse=reverse)
+        
+        print(f"\n{'='*120}")
+        print(f"GOOGLE DRIVE SEARCH RESULTS - {len(self.files_data)} items found")
+        print(f"{'='*120}")
+        
+        if show_details:
+            # Detailed view
+            print(f"{'Name':<40} {'Type':<20} {'Size':<12} {'Modified':<20} {'Path'}")
+            print(f"{'-'*40} {'-'*20} {'-'*12} {'-'*20} {'-'*50}")
+            
+            for file_data in self.files_data:
+                if 'error' in file_data:
+                    print(f"{file_data['name']:<40} {'ERROR':<20} {'N/A':<12} {'N/A':<20} {file_data['error']}")
+                else:
+                    name = file_data['name'][:37] + '...' if len(file_data['name']) > 40 else file_data['name']
+                    path = file_data['relative_path'][:47] + '...' if len(file_data['relative_path']) > 50 else file_data['relative_path']
+                    print(f"{name:<40} {file_data['file_type']:<20} {file_data['size_mb']:<12} {file_data['modified_date']:<20} {path}")
+        else:
+            # Simple view
+            for file_data in self.files_data:
+                if 'error' not in file_data:
+                    print(f"{file_data['relative_path']}")
+
+    def export_results(self, output_file: str, format: str = 'json'):
+        """Export search results to file"""
+        if not self.files_data:
+            print("No data to export.")
+            return
+        
+        if format.lower() == 'json':
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(self.files_data, f, indent=2, ensure_ascii=False)
+        elif format.lower() == 'csv':
+            import csv
+            if self.files_data:
+                with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=self.files_data[0].keys())
+                    writer.writeheader()
+                    writer.writerows(self.files_data)
+        elif format.lower() == 'txt':
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(f"Google Drive Search Results - {len(self.files_data)} items\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("="*80 + "\n\n")
+                for file_data in self.files_data:
+                    f.write(f"Name: {file_data.get('name', 'N/A')}\n")
+                    f.write(f"Path: {file_data.get('path', 'N/A')}\n")
+                    f.write(f"Size: {file_data.get('size_mb', 'N/A')} MB\n")
+                    f.write(f"Type: {file_data.get('file_type', 'N/A')}\n")
+                    f.write(f"Modified: {file_data.get('modified_date', 'N/A')}\n")
+                    f.write("-" * 40 + "\n")
+        
+        print(f"Results exported to: {output_file}")
+    
+    def upload_to_google_sheets(self, sheet_id: str = None, service_account_file: str = 'service-account.json'):
+        """
+        Upload search results to Google Sheets
+
+        Args:
+            sheet_id: Google Sheet ID (defaults to GOOGLE_SHEET_ID from config)
+            service_account_file: Path to service account JSON file
+        """
+        if not GOOGLE_SHEETS_AVAILABLE:
+            print("Error: gspread library not installed. Install with: pip install gspread google-auth")
+            return False
+    parser.add_argument('--name', help='Filter by filename (contains)')
+    parser.add_argument('--min-size', type=int, help='Minimum file size in bytes')
+    parser.add_argument('--max-size', type=int, help='Maximum file size in bytes')
+    parser.add_argument('--no-dirs', action='store_true', help='Exclude directories from results')
+    parser.add_argument('--sort', choices=['name', 'size', 'modified', 'created', 'type', 'extension'], 
+                       default='name', help='Sort results by field')
+    parser.add_argument('--reverse', action='store_true', help='Reverse sort order')
+    parser.add_argument('--simple', action='store_true', help='Show simple file list only')
+    parser.add_argument('--export', help='Export results to file (default: drive_files.csv)', default='drive_files.csv')
+    parser.add_argument('--format', choices=['json', 'csv', 'txt'], default='csv', 
+                       help='Export format (default: csv)')
+    parser.add_argument('--stats', action='store_true', help='Show statistics')
+    parser.add_argument('--no-display', action='store_true', help='Skip displaying results, just export')
+    parser.add_argument('--sheet-id', help='Google Sheet ID to upload results to')
+    parser.add_argument('--service-account', help='Path to service account JSON file', default='service-account.json')
+    
+    args = parser.parse_args()
+    
+    try:
+        # Initialize searcher
+        searcher = DriveSearcher(args.path)
+        
+        # Perform search
+        results = searcher.search_drive(
+            extension_filter=args.extension,
+            name_filter=args.name,
+            min_size=args.min_size,
+            max_size=args.max_size,
+            include_dirs=not args.no_dirs
+        )
+        
+        # Display results unless skipped
+        if not args.no_display:
+            searcher.display_results(
+                sort_by=args.sort,
+                reverse=args.reverse,
+                show_details=not args.simple
+            )
+        
+        # Always export results
+        searcher.export_results(args.export, args.format)
+        
+        # Show statistics if requested
+        if args.stats:
+            stats = searcher.get_statistics()
+            print(f"\n{'='*60}")
+            print("STATISTICS")
+            print(f"{'='*60}")
+            print(f"Total items: {stats.get('total_items', 0)}")
+            print(f"Total size: {round(stats.get('total_size_mb', 0), 2)} MB")
+            
+            print(f"\nTop file types:")
+            for file_type, count in sorted(stats['file_types'].items(), key=lambda x: x[1], reverse=True)[:10]:
+                print(f"  {file_type}: {count}")
+            
+            print(f"\nTop extensions:")
+            for ext, count in sorted(stats['extensions'].items(), key=lambda x: x[1], reverse=True)[:10]:
+                print(f"  {ext}: {count}")
+        
+        print(f"\n✅ Done! Results exported to: {args.export}")
+        print(f"📊 Open this file in Excel to view and analyze your Google Drive files.")
+            
+        # Upload to Google Sheets (use configured sheet ID or provided argument)
+        sheet_id_to_use = args.sheet_id if args.sheet_id else GOOGLE_SHEET_ID
+        print(f"\n📤 Uploading to Google Sheets...")
+        searcher.upload_to_google_sheets(sheet_id_to_use, args.service_account)
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
