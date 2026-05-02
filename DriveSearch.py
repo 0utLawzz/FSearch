@@ -16,6 +16,7 @@ import pickle
 try:
     import gspread
     from google.oauth2.service_account import Credentials
+    from gspread.formatting import cell_format, color, textFormat
     GOOGLE_SHEETS_AVAILABLE = True
 except ImportError:
     GOOGLE_SHEETS_AVAILABLE = False
@@ -724,6 +725,163 @@ class DriveSearcher:
             print("Error: gspread library not installed. Install with: pip install gspread google-auth")
             return False
 
+        if not self.files_data:
+            print("No data to upload.")
+            return False
+
+        # Use configured sheet ID if not provided
+        if sheet_id is None:
+            sheet_id = GOOGLE_SHEET_ID
+
+        try:
+            # Authenticate with Google Sheets
+            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+            creds = Credentials.from_service_account_file(service_account_file, scopes=scope)
+            client = gspread.authorize(creds)
+
+            # Open the spreadsheet
+            sheet = client.open_by_key(sheet_id)
+
+            # Try to get the worksheet, create it if it doesn't exist
+            worksheet_name_to_use = sheet_name if sheet_name else LOCAL_CONFIG["sheet_name"]
+
+            try:
+                worksheet = sheet.worksheet(worksheet_name_to_use)
+                print(f"Found existing worksheet: {worksheet_name_to_use}")
+            except gspread.WorksheetNotFound:
+                print(f"Worksheet '{worksheet_name_to_use}' not found. Creating it...")
+                worksheet = sheet.add_worksheet(title=worksheet_name_to_use, rows="1000", cols="50")
+
+            # Prepare data with specific column order
+            if column_order is None:
+                column_order = [
+                    'name', 'extension', 'file_type', 'is_directory', 'is_hidden',
+                    'parent_folder', 'depth', 'LEVEL1', 'LEVEL2', 'LEVEL3', 'LEVEL4', 'LEVEL5',
+                    'LEVEL_FILE', 'created_date', 'modified_date', 'accessed_date', 'path',
+                    'relative_path', 'size_mb'
+                ]
+
+            # Add emojis to header
+            header_with_emoji = []
+            emoji_map = {
+                'name': '📄 Name',
+                'extension': '🔤 Ext',
+                'file_type': '📁 Type',
+                'is_directory': '📂 Dir',
+                'is_hidden': '👁️ Hidden',
+                'parent_folder': '📂 Parent',
+                'depth': '📊 Depth',
+                'LEVEL1': '1️⃣ L1',
+                'LEVEL2': '2️⃣ L2',
+                'LEVEL3': '3️⃣ L3',
+                'LEVEL4': '4️⃣ L4',
+                'LEVEL5': '5️⃣ L5',
+                'LEVEL_FILE': '📝 File',
+                'created_date': '📅 Created',
+                'modified_date': '✏️ Modified',
+                'accessed_date': '👀 Accessed',
+                'path': '📍 Path',
+                'relative_path': '🔗 Rel Path',
+                'size_mb': '💾 Size MB',
+                'root_label': '🏷️ Root',
+                'duplicate_group': '🔁 Dup Group',
+                'is_duplicate': '⚠️ Is Dup',
+                'duplicate_index': '🔢 Dup #',
+                'duplicate_total': '📊 Dup Total',
+                'duplicate_key': '🔑 Dup Key',
+                'parent_folder_id': '📂 Parent ID',
+                'parents': '🔗 Parents',
+                'id': '🆔 ID',
+                'mimeType': '📄 MIME',
+                'is_folder': '📂 Folder',
+                'size': '💾 Size',
+                'createdTime': '📅 Created',
+                'modifiedTime': '✏️ Modified',
+                'owners': '👤 Owners',
+                'ownerEmails': '📧 Owner Emails',
+                'lastModifyingUser': '👤 Last Mod By',
+                'lastModifyingUserEmail': '📧 Last Mod Email',
+                'shared': '🔗 Shared',
+                'starred': '⭐ Starred',
+                'ownedByMe': '👤 Owned By Me',
+                'trashed': '🗑️ Trashed',
+                'webViewLink': '🔗 Web Link',
+                'webContentLink': '📥 Download Link',
+                'iconLink': '🖼️ Icon',
+                'md5Checksum': '🔐 MD5',
+                'sha1Checksum': '🔐 SHA1',
+                'sha256Checksum': '🔐 SHA256',
+                'driveId': '🆔 Drive ID',
+                'teamDriveId': '🆔 Team Drive ID',
+                'shortcutTargetId': '🔗 Shortcut ID',
+                'shortcutTargetMimeType': '📄 Shortcut MIME',
+            }
+            for col in column_order:
+                header_with_emoji.append(emoji_map.get(col, col))
+
+            # Check if sheet has any content
+            all_values = worksheet.get_all_values()
+            is_empty = len(all_values) == 0
+
+            # Prepare data rows
+            data = []
+            for file_data in self.files_data:
+                row = []
+                for key in column_order:
+                    value = file_data.get(key, '')
+                    # Convert boolean values to Yes/No for better readability
+                    if isinstance(value, bool):
+                        value = 'Yes' if value else 'No'
+                    elif value is None:
+                        value = ''
+                    else:
+                        value = str(value)
+                    row.append(value)
+                data.append(row)
+
+            # Check for duplicates against existing data (skip header row)
+            existing_rows = all_values[1:] if len(all_values) > 0 else []
+            existing_set = set(tuple(row) for row in existing_rows)
+            new_rows = []
+            duplicate_count = 0
+            for row in data:
+                if tuple(row) in existing_set:
+                    duplicate_count += 1
+                else:
+                    new_rows.append(row)
+
+            # Add header only for empty sheet (never rewrite existing sheet)
+            if is_empty:
+                print("Adding header row with formatting...")
+                worksheet.append_row(header_with_emoji, value_input_option='RAW')
+                # Format header: bold, background color
+                fmt = cell_format(
+                    backgroundColor=color(0.2, 0.4, 0.8),
+                    textFormat=textFormat(bold=True, fontSize=11)
+                )
+                worksheet.format(f'1:1', fmt)
+
+            # Upload data and report stats
+            if new_rows:
+                print(f"Uploading {len(new_rows)} new rows to Google Sheets...")
+                worksheet.append_rows(new_rows, value_input_option='RAW')
+            else:
+                print("No new rows to upload (all duplicates).")
+
+            if duplicate_count > 0:
+                print(f"Skipped {duplicate_count} duplicate rows.")
+
+            # Freeze the first row (only meaningful if header exists)
+            worksheet.freeze(rows=1)
+
+            print(f"✅ Successfully uploaded {len(self.files_data)} items to Google Sheet!")
+            print(f"📊 Sheet URL: https://docs.google.com/spreadsheets/d/{sheet_id}")
+            return True
+
+        except Exception as e:
+            print(f"Error uploading to Google Sheets: {e}")
+            return False
+
     def upload_stats_to_google_sheets(self, stats: Dict, sheet_id: str = None, service_account_file: str = 'service-account.json', sheet_name: str = 'Stats'):
         if not GOOGLE_SHEETS_AVAILABLE:
             print("Error: gspread library not installed. Install with: pip install gspread google-auth")
@@ -768,82 +926,6 @@ class DriveSearcher:
             return True
         except Exception as e:
             print(f"Error uploading stats to Google Sheets: {e}")
-            return False
-
-        if not self.files_data:
-            print("No data to upload.")
-            return False
-
-        # Use configured sheet ID if not provided
-        if sheet_id is None:
-            sheet_id = GOOGLE_SHEET_ID
-
-        try:
-            # Authenticate with Google Sheets
-            scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-            creds = Credentials.from_service_account_file(service_account_file, scopes=scope)
-            client = gspread.authorize(creds)
-
-            # Open the spreadsheet
-            sheet = client.open_by_key(sheet_id)
-
-            # Try to get the worksheet, create it if it doesn't exist
-            worksheet_name_to_use = sheet_name if sheet_name else LOCAL_GOOGLE_SHEET_NAME
-
-            try:
-                worksheet = sheet.worksheet(worksheet_name_to_use)
-                print(f"Found existing worksheet: {worksheet_name_to_use}")
-            except gspread.WorksheetNotFound:
-                print(f"Worksheet '{worksheet_name_to_use}' not found. Creating it...")
-                worksheet = sheet.add_worksheet(title=worksheet_name_to_use, rows="1000", cols="50")
-
-            # Prepare data with specific column order
-            if column_order is None:
-                column_order = [
-                    'name', 'extension', 'file_type', 'is_directory', 'is_hidden',
-                    'parent_folder', 'depth', 'LEVEL1', 'LEVEL2', 'LEVEL3', 'LEVEL4', 'LEVEL5',
-                    'LEVEL_FILE', 'created_date', 'modified_date', 'accessed_date', 'path',
-                    'relative_path', 'size_mb'
-                ]
-
-            # Check if sheet has any content
-            all_values = worksheet.get_all_values()
-            is_empty = len(all_values) == 0
-
-            # Prepare data rows
-            data = []
-            for file_data in self.files_data:
-                row = []
-                for key in column_order:
-                    value = file_data.get(key, '')
-                    # Convert boolean values to Yes/No for better readability
-                    if isinstance(value, bool):
-                        value = 'Yes' if value else 'No'
-                    elif value is None:
-                        value = ''
-                    else:
-                        value = str(value)
-                    row.append(value)
-                data.append(row)
-
-            # Add header only for empty sheet (never rewrite existing sheet)
-            if is_empty:
-                print("Adding header row...")
-                worksheet.append_row(column_order, value_input_option='RAW')
-
-            # Upload data (always append)
-            print(f"Uploading {len(data)} rows to Google Sheets...")
-            worksheet.append_rows(data, value_input_option='RAW')
-
-            # Freeze the first row (only meaningful if header exists)
-            worksheet.freeze(rows=1)
-
-            print(f"✅ Successfully uploaded {len(self.files_data)} items to Google Sheet!")
-            print(f"📊 Sheet URL: https://docs.google.com/spreadsheets/d/{sheet_id}")
-            return True
-
-        except Exception as e:
-            print(f"Error uploading to Google Sheets: {e}")
             return False
     
     def get_statistics(self) -> Dict:
