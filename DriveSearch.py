@@ -829,6 +829,22 @@ class DriveSearcher:
             all_values = worksheet.get_all_values()
             is_empty = len(all_values) == 0
 
+            # Ensure header exists (even if sheet has data but no header)
+            if is_empty or (len(all_values) > 0 and all_values[0] != header_with_emoji):
+                if is_empty:
+                    print("Adding header row with formatting...")
+                else:
+                    print("Header missing or mismatched. Adding header row...")
+                # Insert header at row 1
+                worksheet.insert_row(header_with_emoji, 1)
+                # Format header: bold, background color (if formatting available)
+                if GSPREAD_FORMATTING_AVAILABLE:
+                    fmt = cell_format(
+                        backgroundColor=color(0.2, 0.4, 0.8),
+                        textFormat=textFormat(bold=True, fontSize=11)
+                    )
+                    worksheet.format(f'1:1', fmt)
+
             # Prepare data rows
             data = []
             for file_data in self.files_data:
@@ -856,18 +872,7 @@ class DriveSearcher:
                 else:
                     new_rows.append(row)
 
-            # Add header only for empty sheet (never rewrite existing sheet)
-            if is_empty:
-                print("Adding header row with formatting...")
-                worksheet.append_row(header_with_emoji, value_input_option='RAW')
-                # Format header: bold, background color (if formatting available)
-                if GSPREAD_FORMATTING_AVAILABLE:
-                    fmt = cell_format(
-                        backgroundColor=color(0.2, 0.4, 0.8),
-                        textFormat=textFormat(bold=True, fontSize=11)
-                    )
-                    worksheet.format(f'1:1', fmt)
-
+            
             # Upload data and report stats
             if new_rows:
                 print(f"Uploading {len(new_rows)} new rows to Google Sheets...")
